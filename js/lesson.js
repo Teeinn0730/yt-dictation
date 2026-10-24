@@ -126,6 +126,43 @@ export function buildSegments(words, level) {
   return segs;
 }
 
+// 接續處理：把新產生的字幕接到現有課程裡，原本的進度不變。
+// 新字幕以「一行字幕」為單位加入；和現有字幕時間重疊的行會略過，避免重複。回傳加入幾個字
+export function appendWords(L, newWords) {
+  const existing = L.words.slice().sort((a, b) => a.start - b.start);
+  const starts = existing.map(w => w.start);
+  const covered = (a, b) => {
+    let lo = 0, hi = starts.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (starts[mid] < b) lo = mid + 1; else hi = mid; }
+    for (let k = lo - 1; k >= 0 && k >= lo - 3; k--) if (existing[k].end > a) return true;
+    return false;
+  };
+
+  const added = [];
+  let group = [];
+  for (const w of newWords) {
+    group.push(w);
+    if (!w.cueEnd && w !== newWords[newWords.length - 1]) continue;
+    const a = group[0].start + 0.3, b = Math.max(a + 0.01, group[group.length - 1].end - 0.3);
+    if (!covered(a, b)) added.push(...group);
+    group = [];
+  }
+  if (!added.length) return 0;
+
+  const cursorWord = L.words[L.cursor];
+  const all = [
+    ...L.words.map((w, i) => ({ w, s: L.state[i] })),
+    ...added.map(w => ({ w, s: '0' })),
+  ].sort((x, y) => x.w.start - y.w.start);
+  L.words = all.map(x => x.w);
+  L.state = all.map(x => x.s);
+  L.cursor = Math.max(0, L.words.indexOf(cursorWord));
+  return added.length;
+}
+
+// 課程目前涵蓋到影片的第幾秒（接續處理時從這裡開始）
+export const lessonEndSec = L => L.words.reduce((m, w) => Math.max(m, w.end), 0);
+
 // ---------- 存取 ----------
 // state：每個字一個字元，0 未完成、1 聽寫正確、2 揭曉、3 Easy 提示
 export function newLesson({ videoId, title, words, enhanced, source }) {

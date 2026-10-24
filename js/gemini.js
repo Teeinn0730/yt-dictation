@@ -2,6 +2,7 @@
 import { getSettings, saveSettings } from './storage.js';
 import { toSeconds, fillEnds } from './transcript.js';
 import { applyEnhanced } from './lesson.js';
+import { normWord } from './dictation.js';
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -53,7 +54,8 @@ function sleep(ms, signal) {
 const partsText = cand => (cand?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('');
 
 // 呼叫一次模型。有 onText 時用串流（SSE），每收到一小段就回報目前累積的文字
-async function callModel(model, body, { onText, signal } = {}) {
+// onActivity：只要有收到任何資料（包含模型的思考過程）就呼叫，用來判斷「還活著」
+async function callModel(model, body, { onText, onActivity, signal } = {}) {
   const { apiKey } = getSettings();
   if (!apiKey) throw new GeminiError('尚未設定 Gemini API 金鑰，請先到「設定」頁面貼上。');
   const action = onText ? 'streamGenerateContent?alt=sse' : 'generateContent';
@@ -91,6 +93,7 @@ async function callModel(model, body, { onText, signal } = {}) {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line.startsWith('data:')) continue;
+        onActivity?.();
         try {
           const cand = JSON.parse(line.slice(5)).candidates?.[0];
           text += partsText(cand);
@@ -107,7 +110,7 @@ async function callModel(model, body, { onText, signal } = {}) {
 }
 
 // onText：串流時回報目前文字；onStatus：重試、換模型等狀態訊息；signal：用來取消
-export async function generate(parts, { schema, temperature = 0.3, mediaResolution, retries = 2, onText, onStatus, signal } = {}) {
+export async function generate(parts, { schema, temperature = 0.3, mediaResolution, retries = 2, onText, onActivity, onStatus, signal } = {}) {
   let { model } = getSettings();
   let healed = false;
   const generationConfig = { temperature };
@@ -121,7 +124,7 @@ export async function generate(parts, { schema, temperature = 0.3, mediaResoluti
   let data;
   for (let attempt = 0; ; attempt++) {
     try {
-      data = await callModel(model, body, { onText, signal });
+      data = await callModel(model, body, { onText, onActivity, signal });
       break;
     } catch (e) {
       // 每分鐘次數用完時，等一下再重試
@@ -199,7 +202,7 @@ const TRANSCRIBE_SCHEMA = {
 };
 
 // onProgress({ count, at, pct })：目前產生了幾句、寫到影片第幾秒、完成比例（0~1）
-export async function transcribeVideo(videoId, startSec, endSec, { onProgress, onStatus, signal } = {}) {
+export async function transcribeVideo(videoId, startSec, endSec, { onProgress, onActivity, onStatus, signal } = {}) {
   const prompt = `You are a professional caption transcriber.
 Transcribe ALL spoken English in this video clip verbatim. Do not summarize, paraphrase or correct the speaker's grammar.
 - Use normal English capitalization and punctuation.
@@ -226,6 +229,7 @@ ${MARKER_RULES}
     temperature: 0.1,
     mediaResolution: 'MEDIA_RESOLUTION_LOW',
     onText,
+    onActivity,
     onStatus,
     signal,
   });
@@ -238,6 +242,62 @@ ${MARKER_RULES}
   }
   cues.sort((a, b) => a.start - b.start);
   return { language: String(out.language || '').toLowerCase(), cues: fillEnds(cues) };
+}
+
+// ---------- 長影片：拆成 5 分鐘一段依序處理，再合併成一份 ----------
+const CHUNK_SEC = 300;
+const OVERLAP_SEC = 8;
+
+// 兩句幾乎同時開始、而且字大部分一樣：視為交界處重複產生的同一句
+function isDuplicate(merged, cue) {
+  const words = new Set(cue.text.split(/\s+/).map(normWord).filter(Boolean));
+  if (!words.size) return true;
+  return merged.slice(-4).some(m => {
+    if (Math.abs(m.start - cue.start) > 3) return false;
+    const other = m.text.split(/\s+/).map(normWord).filter(Boolean);
+    const same = other.filter(w => words.has(w)).length;
+    return same / Math.max(1, Math.min(words.size, other.length)) >= 0.6;
+  });
+}
+
+// 每段前後多看 8 秒，句子不會在交界處被切斷；合併時每段只留「開始時間在自己範圍內」的句子，再去掉重複
+// 某一段失敗時，錯誤物件的 partial 會帶著已完成的部分，讓呼叫端可以先建立練習
+export async function transcribeRange(videoId, startSec, endSec, { onChunk, onProgress, onActivity, onStatus, signal } = {}) {
+  const n = Math.max(1, Math.ceil((endSec - startSec) / CHUNK_SEC));
+  const merged = [];
+  let language = '';
+  for (let i = 0; i < n; i++) {
+    const cs = startSec + i * CHUNK_SEC;
+    const ce = Math.min(endSec, cs + CHUNK_SEC);
+    onChunk?.(i, n, cs, ce);
+    let res;
+    try {
+      res = await transcribeVideo(videoId, Math.max(0, i ? cs - OVERLAP_SEC : cs), i < n - 1 ? ce + OVERLAP_SEC : ce, {
+        onActivity,
+        onStatus,
+        signal,
+        onProgress: p => onProgress?.({
+          chunk: i,
+          chunks: n,
+          count: merged.length + p.count,
+          at: p.at,
+          pct: (i + Math.min(1, Math.max(0, (p.at - cs) / Math.max(1, ce - cs)))) / n,
+        }),
+      });
+    } catch (e) {
+      e.partial = { cues: fillEnds(merged.slice()), language, doneUntil: cs, chunk: i, chunks: n };
+      throw e;
+    }
+    if (!language) language = res.language;
+    for (const c of res.cues) {
+      if (i > 0 && c.start < cs) continue;      // 屬於上一段
+      if (i < n - 1 && c.start >= ce) continue; // 屬於下一段
+      if (isDuplicate(merged, c)) continue;
+      merged.push(c);
+    }
+  }
+  merged.sort((a, b) => a.start - b.start);
+  return { language, cues: fillEnds(merged) };
 }
 
 // ---------- 有字幕時：只請 Gemini 補標點、標出切句位置（純文字，很省額度） ----------

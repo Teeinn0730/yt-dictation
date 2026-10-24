@@ -1,6 +1,6 @@
 import { parseTranscript, detectLang, formatTime } from './transcript.js';
 import { normWord, tokenize, lcsPairs, maskWord, cleanWord, isStopWord, shuffle } from './dictation.js';
-import { cuesToWords, buildSegments, newLesson, loadLesson, saveLesson, lessonStats } from './lesson.js';
+import { cuesToWords, buildSegments, newLesson, loadLesson, saveLesson, lessonStats, appendWords, lessonEndSec } from './lesson.js';
 import { SegmentPlayer, parseVideoId } from './youtube.js';
 import { lookup, pronounce } from './dictionary.js';
 import * as gemini from './gemini.js';
@@ -135,9 +135,12 @@ function onLoadUrl() {
   newVideoId = id;
   $('#step-transcript').hidden = false;
   $('#new-thumb').src = thumb(id);
-  const exists = store.listLessons().some(l => l.videoId === id);
-  $('#new-exists').hidden = !exists;
+  const existing = store.listLessons().some(l => l.videoId === id) ? loadLesson(id) : null;
+  $('#new-exists').hidden = !existing;
   $('#new-exists-link').href = `#/lesson/${id}`;
+  // 已經有練習：可以用 Gemini 接續處理後面的時間，預設從目前涵蓋到的地方開始
+  $('#append-row').hidden = !existing;
+  $('#tr-start').value = existing ? Math.floor(lessonEndSec(existing) / 60) : 0;
   setStatus($('#create-status'), '');
   $('#step-transcript').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -158,16 +161,18 @@ async function fetchTitle(id) {
   return '';
 }
 
-// 進度條：pct 為 null 時顯示「還不知道進度」的動畫；超過 limit 秒自動取消
+// 進度條：pct 為 null 時顯示「還不知道進度」的動畫。
+// 不限制總時間：只有連續 idleSec 秒完全沒有新進度，才判斷卡住並自動取消
 const progress = {
   ctrl: null,
   timer: null,
   t0: 0,
-  limit: 0,
-  start(text, hint = '', limitSec = 0) {
+  last: 0,
+  idle: 0,
+  start(text, hint = '', idleSec = 0) {
     this.ctrl = new AbortController();
-    this.t0 = Date.now();
-    this.limit = limitSec;
+    this.t0 = this.last = Date.now();
+    this.idle = idleSec;
     $('#progress-box').hidden = false;
     this.set(null, text, hint);
     clearInterval(this.timer);
@@ -175,7 +180,11 @@ const progress = {
     this.timer = setInterval(() => this.tick(), 1000);
     return this.ctrl.signal;
   },
+  touch() {
+    this.last = Date.now();
+  },
   set(pct, text, hint) {
+    this.touch();
     const bar = $('#prog-bar');
     bar.parentElement.classList.toggle('indeterminate', pct == null);
     if (pct != null) bar.style.width = `${Math.round(pct * 100)}%`;
@@ -184,8 +193,9 @@ const progress = {
   },
   tick() {
     const s = Math.floor((Date.now() - this.t0) / 1000);
-    $('#prog-time').textContent = `已等待 ${formatTime(s)}`;
-    if (this.limit && s >= this.limit) this.ctrl?.abort('timeout');
+    const quiet = Math.floor((Date.now() - this.last) / 1000);
+    $('#prog-time').textContent = `已等待 ${formatTime(s)}` + (quiet >= 60 ? `（${formatTime(quiet)} 沒有新進度）` : '');
+    if (this.idle && quiet >= this.idle) this.ctrl?.abort('timeout');
   },
   stop() {
     clearInterval(this.timer);
@@ -195,16 +205,34 @@ const progress = {
 };
 $('#btn-cancel').addEventListener('click', () => progress.ctrl?.abort('user'));
 
+const WATCH_HINT = 'Gemini 會先把這一段影片看完才開始寫字幕，這段時間沒有進度是正常的（通常 30 秒到 2 分鐘）。';
+
+// 把字存成練習：append 時接在現有練習後面，否則建立新的。回傳加入幾個字
+async function saveWords(id, words, { enhanced, source, append }) {
+  if (append) {
+    const lesson = loadLesson(id);
+    const added = appendWords(lesson, words);
+    if (added && !saveLesson(lesson)) throw new Error('瀏覽器儲存空間不足，請到首頁刪除一些舊影片。');
+    return added;
+  }
+  const lesson = newLesson({ videoId: id, title: await fetchTitle(id), words, enhanced, source });
+  if (!saveLesson(lesson)) throw new Error('瀏覽器儲存空間不足，請到首頁刪除一些舊影片。');
+  return words.length;
+}
+
 async function createLesson() {
   const id = newVideoId;
   const status = $('#create-status');
   const btn = $('#btn-create');
   if (!id) return;
-  if (store.listLessons().some(l => l.videoId === id) && !confirm('這部影片已經有練習進度，要重新建立並清除舊進度嗎？')) return;
+  const exists = store.listLessons().some(l => l.videoId === id);
+  const append = exists && srcTab === 'ai' && $('#opt-append').checked;
+  if (exists && !append && !confirm('這部影片已經有練習進度，要重新建立並清除舊進度嗎？')) return;
 
   btn.disabled = true;
   setStatus(status, '');
   let signal = null;
+  let partial = null;
   const onStatus = msg => progress.set(null, null, msg);
   try {
     let words, enhanced = false;
@@ -234,19 +262,26 @@ async function createLesson() {
     } else {
       if (!gemini.hasKey()) throw new Error('自動產生字幕需要 Gemini 金鑰，請先到「設定」頁貼上。');
       const startMin = Math.max(0, +$('#tr-start').value || 0);
-      const lenMin = Math.min(30, Math.max(1, +$('#tr-len').value || 10));
+      const lenMin = Math.min(120, Math.max(1, +$('#tr-len').value || 10));
       const startSec = startMin * 60, endSec = (startMin + lenMin) * 60;
-      signal = progress.start(
-        '✨ Gemini 正在看影片…',
-        'Gemini 會先把整段影片看完才開始寫字幕，這段時間沒有進度是正常的（通常 30 秒到 2 分鐘）。',
-        360,
-      );
-      const { language, cues } = await gemini.transcribeVideo(id, startSec, endSec, {
-        signal,
-        onStatus,
-        onProgress: ({ count, at, pct }) =>
-          progress.set(pct, `✍️ 已產生 ${count} 句字幕・寫到 ${formatTime(at)} / ${formatTime(endSec)}`, ''),
-      });
+      const part = (i, n) => (n > 1 ? `第 ${i + 1} / ${n} 段・` : '');
+      signal = progress.start('✨ Gemini 正在看影片…', WATCH_HINT, 240);
+      let result;
+      try {
+        result = await gemini.transcribeRange(id, startSec, endSec, {
+          signal,
+          onStatus,
+          onActivity: () => progress.touch(),
+          onChunk: (i, n, cs, ce) =>
+            progress.set(i ? i / n : null, `${part(i, n)}✨ Gemini 正在看 ${formatTime(cs)}–${formatTime(ce)}…`, WATCH_HINT),
+          onProgress: ({ chunk, chunks, count, at, pct }) =>
+            progress.set(pct, `${part(chunk, chunks)}✍️ 已產生 ${count} 句・寫到 ${formatTime(at)} / ${formatTime(endSec)}`, ''),
+        });
+      } catch (e) {
+        if (e.partial?.cues?.length) partial = e.partial;
+        throw e;
+      }
+      const { language, cues } = result;
       if (!cues.length) throw new Error('Gemini 沒有辨識到任何英文語音。');
       if (language && !language.startsWith('en')) toast('這部影片的主要語言好像不是英文，聽寫效果可能不理想。', 6000);
       words = cuesToWords(cues);
@@ -256,9 +291,9 @@ async function createLesson() {
 
     progress.stop();
     setStatus(status, '建立中…');
-    const title = await fetchTitle(id);
-    const lesson = newLesson({ videoId: id, title, words, enhanced, source: srcTab });
-    if (!saveLesson(lesson)) throw new Error('瀏覽器儲存空間不足，請到首頁刪除一些舊影片。');
+    const added = await saveWords(id, words, { enhanced, source: srcTab, append });
+    if (append && !added) throw new Error('這段時間的字幕已經都在練習裡了，請把「從第幾分鐘開始」往後調。');
+    if (append) toast(`已接續加入 ${added} 個字`);
     L = null;
     setStatus(status, '');
     $('#url-input').value = '';
@@ -267,8 +302,23 @@ async function createLesson() {
     location.hash = `#/lesson/${id}`;
   } catch (e) {
     let msg = e.message;
-    if (signal?.reason === 'timeout') msg = '等太久了，已自動停止。可以把「處理幾分鐘」改小一點（例如 5 分鐘）再試一次。';
+    if (signal?.reason === 'timeout') msg = '已經連續 4 分鐘沒有任何進度，判斷 Gemini 卡住了，已自動停止。';
     else if (signal?.reason === 'user') msg = '已取消。';
+    // 拆段處理時，前面完成的段落先存成練習，之後可以「接續」把剩下的補上
+    if (partial) {
+      try {
+        const added = await saveWords(id, cuesToWords(partial.cues), { enhanced: true, source: 'ai', append: append || exists });
+        if (added) {
+          msg += `\n已完成的部分（到 ${formatTime(partial.doneUntil)}）已存成練習。之後可以從第 ${Math.floor(partial.doneUntil / 60)} 分鐘「接續」處理剩下的部分。`;
+          $('#tr-start').value = Math.floor(partial.doneUntil / 60);
+          $('#append-row').hidden = false;
+          $('#opt-append').checked = true;
+          renderLibrary();
+        }
+      } catch (err) {
+        msg += `\n（已完成的部分也沒能存下來：${err.message}）`;
+      }
+    }
     setStatus(status, msg, 'error');
   } finally {
     progress.stop();
