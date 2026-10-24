@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YT Dictation</title>
+  <meta name="description" content="用 YouTube 影片練習英文聽寫：遮罩句子、逐字即時批改、查單字、單字本複習。">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎧</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#/">🎧 YT Dictation</a>
+      <nav>
+        <a href="#/" data-route="home">練習</a>
+        <a href="#/vocab" data-route="vocab">單字本 <span id="due-badge" class="badge" hidden></span></a>
+        <a href="#/settings" data-route="settings">設定</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- ================= 首頁 ================= -->
+    <section id="view-home" class="view container">
+      <div id="key-banner" class="banner" hidden>
+        💡 不設定金鑰也能練習（貼上轉錄稿）。設定免費的 Gemini 金鑰後，可以自動產生字幕、讓切句更自然，還能看單字的中文解釋。
+        <a href="#/settings">前往設定 →</a>
+      </div>
+
+      <div class="card">
+        <h2><span class="step">1</span>新增 YouTube 影片</h2>
+        <div class="row">
+          <input id="url-input" type="url" placeholder="貼上 YouTube 網址，例如 https://www.youtube.com/watch?v=..." autocomplete="off">
+          <button id="btn-load" class="primary">下一步</button>
+        </div>
+      </div>
+
+      <div id="step-transcript" class="card" hidden>
+        <div class="new-video">
+          <img id="new-thumb" alt="">
+          <div>
+            <h2><span class="step">2</span>取得字幕</h2>
+            <p id="new-exists" class="muted small" hidden>這部影片已經在你的清單裡了。<a id="new-exists-link" href="#/">繼續練習 →</a></p>
+          </div>
+        </div>
+
+        <div class="tabs" role="tablist">
+          <button class="tab active" data-tab="paste">貼上轉錄稿</button>
+          <button class="tab" data-tab="ai">✨ Gemini 自動產生</button>
+        </div>
+
+        <div data-panel="paste">
+          <details class="howto">
+            <summary>怎麼複製 YouTube 的轉錄稿？（電腦版）</summary>
+            <ol>
+              <li>在 YouTube 影片下方的說明欄點「…更多」，往下捲到「顯示轉錄稿」並點開。</li>
+              <li>右側出現轉錄稿面板後，確認語言是<b>英文</b>。</li>
+              <li>從第一行拖曳選取到最後一行，按 Ctrl+C 複製，貼到下面的框框。</li>
+              <li>手機的 YouTube App 無法複製轉錄稿，請改用「✨ Gemini 自動產生」。</li>
+              <li>也可以貼 .srt／.vtt 字幕檔的內容。</li>
+            </ol>
+          </details>
+          <textarea id="tr-paste" rows="6" placeholder="0:00&#10;Hey everyone, welcome back to the channel&#10;0:03&#10;today we're going to..."></textarea>
+          <label id="enhance-row" class="check"><input id="opt-enhance" type="checkbox" checked> 用 Gemini 補標點、讓切句更自然（建議，很省額度）</label>
+        </div>
+
+        <div data-panel="ai" hidden>
+          <p class="muted small">Gemini 會直接「看」這部影片並產生有時間軸的字幕，適合沒有字幕或在手機上使用。只支援<b>公開</b>影片；影片越長越耗免費額度，所以一次處理一段時間。時間軸大約只準到 1 秒左右。</p>
+          <div class="row wrap">
+            <label>從第 <input id="tr-start" type="number" min="0" value="0" class="num"> 分鐘開始</label>
+            <label>處理 <input id="tr-len" type="number" min="1" max="30" value="10" class="num"> 分鐘</label>
+          </div>
+        </div>
+
+        <button id="btn-create" class="primary big">建立練習 →</button>
+        <div id="progress-box" class="progress-box" hidden>
+          <div class="bar big"><span id="prog-bar"></span></div>
+          <div class="row between small">
+            <span id="prog-text"></span>
+            <span id="prog-time" class="muted"></span>
+          </div>
+          <p id="prog-hint" class="muted small"></p>
+          <button id="btn-cancel" type="button">取消</button>
+        </div>
+        <p id="create-status" class="status" hidden></p>
+      </div>
+
+      <div id="library-card" class="card" hidden>
+        <h2>我的影片</h2>
+        <ul id="library" class="library"></ul>
+      </div>
+    </section>
+
+    <!-- ================= 練習 ================= -->
+    <section id="view-lesson" class="view lesson" hidden>
+      <aside class="lesson-list card">
+        <div class="row between">
+          <h3>句子 <span id="list-count" class="muted"></span></h3>
+          <button id="btn-locate" class="icon-btn" title="回到目前的句子">◎</button>
+        </div>
+        <div class="level-box">
+          <div class="muted small">句子太長？選擇切句粒度：</div>
+          <div id="level-switch" class="seg-control">
+            <button data-level="steady">Steady<small>短詞組</small></button>
+            <button data-level="natural">Natural<small>意群</small></button>
+            <button data-level="fluent">Fluent<small>整句</small></button>
+          </div>
+        </div>
+        <ol id="seg-list" class="seg-list"></ol>
+      </aside>
+
+      <div class="lesson-main">
+        <div class="player-wrap">
+          <div id="player"></div>
+          <div id="player-cover" hidden>🎧 畫面已隱藏，專心用聽的</div>
+        </div>
+        <div class="toolbar">
+          <div id="lesson-title" class="lesson-title"></div>
+          <div class="row tight">
+            <span class="vol" title="影片音量">
+              <button id="btn-mute" class="icon-btn" aria-label="靜音／取消靜音">🔊</button>
+              <input id="vol-video" type="range" min="0" max="100" step="5" aria-label="影片音量">
+            </span>
+            <button id="btn-slower" class="icon-btn" title="變慢 ( [ )">−</button>
+            <span id="rate-label" class="rate">1x</span>
+            <button id="btn-faster" class="icon-btn" title="變快 ( ] )">+</button>
+            <button id="btn-video" class="icon-btn" title="顯示／隱藏畫面">🎬</button>
+            <button id="btn-cc" class="icon-btn" title="顯示／隱藏 YouTube 字幕">CC</button>
+          </div>
+        </div>
+
+        <div class="practice card">
+          <div class="row between small muted">
+            <span>🎧 聽聽看，打出你聽到的句子</span>
+            <span id="seg-pos"></span>
+          </div>
+          <div id="slots" class="slots" aria-live="polite"></div>
+          <input id="answer" class="answer" type="text" placeholder="在這裡輸入…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done">
+          <div class="practice-actions">
+            <div class="row tight">
+              <button id="btn-easy" class="toggle" title="Easy 提示（Ctrl+E）">Easy</button>
+              <button id="btn-letter" title="字母提示：每按一次多給一個字母（Ctrl+I）">💡 提示</button>
+            </div>
+            <div class="row tight">
+              <button id="btn-prev" class="icon-btn" title="上一句（Shift+Tab）">←</button>
+              <button id="btn-replay" class="icon-btn big-icon" title="重播（Tab）">⟳</button>
+              <button id="btn-skip" title="跳過（Shift+Enter）">跳過</button>
+              <button id="btn-check" class="primary" title="檢查（Enter）">檢查 →</button>
+            </div>
+          </div>
+          <p id="practice-msg" class="practice-msg"></p>
+        </div>
+      </div>
+
+      <aside class="lesson-side">
+        <div class="card">
+          <h3>本影片進度</h3>
+          <div class="bar big"><span id="stat-bar"></span></div>
+          <div id="stat-text" class="stats"></div>
+        </div>
+        <div class="card">
+          <h3>播放</h3>
+          <label class="row between">每句重複播放
+            <select id="opt-repeat">
+              <option value="1">1 次</option><option value="2">2 次</option><option value="3">3 次</option>
+              <option value="4">4 次</option><option value="5">5 次</option>
+            </select>
+          </label>
+          <label class="check"><input id="opt-autoplay" type="checkbox"> 換句時自動播放</label>
+          <label class="check"><input id="opt-sound" type="checkbox"> 打字音效</label>
+          <label class="row between small">音效音量
+            <input id="vol-sfx" type="range" min="0" max="100" step="5" aria-label="音效音量">
+          </label>
+        </div>
+        <div class="card hotkeys">
+          <h3>快捷鍵</h3>
+          <dl>
+            <dt>重播</dt><dd><kbd>Tab</kbd></dd>
+            <dt>上一句</dt><dd><kbd>Shift</kbd>+<kbd>Tab</kbd></dd>
+            <dt>檢查／下一句</dt><dd><kbd>Enter</kbd></dd>
+            <dt>跳過</dt><dd><kbd>Shift</kbd>+<kbd>Enter</kbd></dd>
+            <dt>Easy 提示</dt><dd><kbd>Ctrl</kbd>+<kbd>E</kbd></dd>
+            <dt>字母提示</dt><dd><kbd>Ctrl</kbd>+<kbd>I</kbd></dd>
+            <dt>揭曉第 N 個字</dt><dd><kbd>Alt</kbd>+<kbd>1~9</kbd></dd>
+            <dt>變慢／變快</dt><dd><kbd>[</kbd> <kbd>]</kbd></dd>
+            <dt>回到 1x</dt><dd><kbd>\</kbd></dd>
+          </dl>
+          <p class="muted small">點遮住的字可以直接揭曉；點已出現的字可以查字典。</p>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ================= 單字本 ================= -->
+    <section id="view-vocab" class="view container" hidden>
+      <div class="card">
+        <div class="row between wrap">
+          <div>
+            <h2>單字本</h2>
+            <p id="vocab-summary" class="muted small"></p>
+          </div>
+          <button id="btn-review" class="primary">🎧 開始聽寫複習</button>
+        </div>
+      </div>
+
+      <div id="review-card" class="card review" hidden>
+        <div class="row between small muted"><span>聽發音，拼出單字</span><span id="review-left"></span></div>
+        <button id="btn-review-say" class="say-big">🔊</button>
+        <input id="review-input" class="answer" type="text" placeholder="拼出你聽到的單字" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done">
+        <div class="row center">
+          <button id="btn-review-check" class="primary">檢查</button>
+          <button id="btn-review-stop" class="link">結束複習</button>
+        </div>
+        <div id="review-answer" hidden></div>
+      </div>
+
+      <ul id="vocab-list" class="vocab-list"></ul>
+    </section>
+
+    <!-- ================= 設定 ================= -->
+    <section id="view-settings" class="view container" hidden>
+      <div class="card">
+        <h2>Gemini API 金鑰（免費）</h2>
+        <p class="muted small">不需要訂閱任何方案，也不用綁信用卡。</p>
+        <ol class="howto-list">
+          <li>用你的 Google 帳號打開 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio 的 API 金鑰頁面</a>。</li>
+          <li>按「Create API key」（建立 API 金鑰）。</li>
+          <li>複製金鑰（開頭通常是 <code>AIza</code>），貼到下面並按「儲存」。</li>
+        </ol>
+        <p class="muted small">🔒 金鑰只存在<b>這台裝置的瀏覽器</b>裡，只會直接傳給 Google。換裝置要重新貼一次。<br>
+          ⚠️ 免費方案的內容可能被 Google 用來改善模型，請不要輸入私人資料。</p>
+        <label class="block">API 金鑰
+          <span class="row">
+            <input id="set-key" type="password" autocomplete="off" spellcheck="false" placeholder="AIza...">
+            <button id="btn-toggle-key" type="button">顯示</button>
+          </span>
+        </label>
+        <label class="block">模型
+          <span class="row">
+            <select id="set-model"></select>
+            <button id="btn-models" type="button">取得可用模型</button>
+          </span>
+        </label>
+        <p class="muted small">按「取得可用模型」會自動選好推薦的模型（flash 系列，免費額度較多）。模型被 Google 淘汰時，程式也會自動換成可用的模型。</p>
+        <div class="row">
+          <button id="btn-save-settings" class="primary">儲存</button>
+          <button id="btn-test">測試連線</button>
+        </div>
+        <p id="set-status" class="status" hidden></p>
+      </div>
+
+      <div class="card">
+        <h2>打字音效</h2>
+        <label class="block">音色
+          <select id="set-keysound">
+            <option value="builtin">內建鍵盤錄音（預設）</option>
+            <option value="blue">青軸機械鍵盤（合成）</option>
+            <option value="office">一般鍵盤（合成）</option>
+            <option value="custom">自訂音檔（上傳你喜歡的打字聲）</option>
+          </select>
+        </label>
+        <div id="custom-sound-box" hidden>
+          <p class="muted small">上傳一段打字的錄音（mp3、wav、m4a 都可以，幾秒到十幾秒最好）。程式會自動切出每一下按鍵聲，打字時隨機播放，聽起來就跟原音一樣。<br>
+            音檔來源：可以用手機錄自己的鍵盤，或到 Pixabay、Freesound 這類網站找標示「可免費使用」的鍵盤音效。</p>
+          <input id="file-keysound" type="file" accept="audio/*">
+        </div>
+        <p id="keysound-status" class="status" hidden></p>
+        <button id="btn-keysound-test">⌨️ 試聽</button>
+      </div>
+
+      <div class="card">
+        <h2>資料</h2>
+        <p class="muted small">練習進度和單字本都存在這台裝置的瀏覽器裡。</p>
+        <button id="btn-clear" class="danger">清除所有資料（含金鑰）</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- 單字卡 -->
+  <div id="sheet" class="sheet" hidden>
+    <div class="sheet-card" role="dialog" aria-modal="true" aria-label="單字">
+      <button id="sheet-close" class="icon-btn sheet-close" aria-label="關閉">✕</button>
+      <div id="sheet-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
