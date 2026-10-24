@@ -27,7 +27,7 @@ export function cuesToWords(cues) {
         continue;
       }
       if (!normWord(t)) continue;
-      toks.push({ text: t, b: 0 });
+      toks.push({ text: t, b: 0, cueEnd: false });
     }
     if (!toks.length) continue;
     // 一行字幕裡的每個字，依字元長度估算時間
@@ -88,19 +88,33 @@ export function applyEnhanced(chunk, text) {
 
 export function buildSegments(words, level) {
   const { bound, min, max } = LEVELS[level];
+  // Natural／Fluent 只在字幕換行處斷句：一行字幕的開始、結束時間是 YouTube 給的，最準；
+  // 同一行裡面的字只有估算時間，在行內硬切容易切到聲音。只有 Steady 會切進行內。
+  // （舊的課程沒有存換行位置，維持原本的切法）
+  const cueAware = level !== 'steady' && words.some(w => w.cueEnd !== undefined);
+  const strength = w => {
+    if (!cueAware) return w.b;
+    if (!w.cueEnd) return 0;
+    return level === 'natural' ? Math.max(w.b, 2) : w.b;
+  };
   const segs = [];
   let s = 0;
   while (s < words.length) {
     let cut = -1;
     for (let e = s; e < words.length; e++) {
       const len = e - s + 1;
-      if ((words[e].b >= bound && len >= min) || (words[e].b === 3 && len >= 2)) { cut = e; break; }
+      const b = strength(words[e]);
+      if ((b >= bound && len >= min) || (b === 3 && len >= 2)) { cut = e; break; }
       // 後面隔了一段很長的空白（例如只有音效的片段），一定要斷開，不然會播很久
       if (words[e + 1] && words[e + 1].start - words[e].end > 2) { cut = e; break; }
       if (len >= max) {
         // 太長了：在範圍內找最強、最後面的斷點
+        // 優先選字幕換行處，其次才是行內的斷點
         let best = e, bestB = 0;
-        for (let k = e; k >= s + min - 1; k--) if (words[k].b > bestB) { bestB = words[k].b; best = k; }
+        for (let k = e; k >= s + min - 1; k--) {
+          const kb = words[k].b + (words[k].cueEnd ? 10 : 0);
+          if (kb > bestB) { bestB = kb; best = k; }
+        }
         cut = best;
         break;
       }
@@ -135,7 +149,7 @@ export function saveLesson(L) {
     enhanced: L.enhanced,
     source: L.source,
     state: L.state.join(''),
-    words: L.words.map(w => [w.text, Math.round(w.start * 100), Math.round(w.end * 100), w.b]),
+    words: L.words.map(w => [w.text, Math.round(w.start * 100), Math.round(w.end * 100), w.b, w.cueEnd ? 1 : 0]),
   };
   const st = lessonStats(L);
   return saveLessonData(L.videoId, data, { title: L.title, total: st.total, done: st.done });
@@ -144,7 +158,7 @@ export function saveLesson(L) {
 export function loadLesson(id) {
   const d = loadLessonData(id);
   if (!d?.words) return null;
-  const words = d.words.map(([text, s, e, b]) => ({ text, start: s / 100, end: e / 100, b }));
+  const words = d.words.map(([text, s, e, b, ce]) => ({ text, start: s / 100, end: e / 100, b, cueEnd: ce === undefined ? undefined : !!ce }));
   const state = (d.state || '').padEnd(words.length, '0').slice(0, words.length).split('');
   return { videoId: d.videoId, title: d.title || '', words, state, level: d.level || 'natural', cursor: d.cursor || 0, enhanced: !!d.enhanced, source: d.source };
 }

@@ -78,7 +78,11 @@ export function parseTranscript(raw) {
       if (t) cur.text = cur.text ? `${cur.text} ${t}` : t;
     }
   }
-  const out = cues.filter(c => /[A-Za-z0-9㐀-鿿]/.test(c.text) && !CREDIT_RE.test(c.text)).sort((a, b) => a.start - b.start);
+  // 先用「全部」的行算出結束時間，再過濾掉 [Screaming]、製作單位這類行：
+  // 被過濾的行雖然不練習，但它的開始時間代表前一句台詞已經說完了
+  cues.sort((a, b) => a.start - b.start);
+  fillEnds(cues);
+  const out = cues.filter(c => /[A-Za-z0-9㐀-鿿]/.test(c.text) && !CREDIT_RE.test(c.text));
   if (isMostlyUpper(out)) {
     let start = true; // 上一行以句號結尾時，這一行開頭才大寫
     for (const c of out) {
@@ -86,7 +90,7 @@ export function parseTranscript(raw) {
       start = /[.!?]["')\]]*$/.test(c.text);
     }
   }
-  return fillEnds(out);
+  return out;
 }
 
 function isMostlyUpper(cues) {
@@ -103,11 +107,21 @@ function toSentenceCase(text, capitalizeFirst) {
   return capitalizeFirst ? s.replace(/^([^A-Za-z]*)([a-z])/, (m, pre, ch) => pre + ch.toUpperCase()) : s;
 }
 
+// 大約要花幾秒說完：英文每字約 0.6 秒、中文每字約 0.3 秒，再加一點緩衝
+function speechSeconds(text) {
+  const words = (text.match(/[A-Za-z0-9'’]+/g) || []).length;
+  const cjk = (text.match(/[㐀-鿿]/g) || []).length;
+  return 1.5 + words * 0.6 + cjk * 0.3;
+}
+
 export function fillEnds(cues) {
   for (let i = 0; i < cues.length; i++) {
     const next = cues[i + 1];
     if (cues[i].end == null || !(cues[i].end > cues[i].start)) {
-      cues[i].end = next ? next.start : cues[i].start + 5;
+      // 轉錄稿只有開始時間：到下一行開始為止，但不超過「說完這些字」需要的時間，
+      // 避免把幾秒的台詞攤到後面一大段沒有人說話的空白
+      const until = next ? next.start : cues[i].start + 5;
+      cues[i].end = Math.min(until, cues[i].start + speechSeconds(cues[i].text));
     }
     cues[i].end = Math.min(cues[i].end, cues[i].start + 15);
   }
