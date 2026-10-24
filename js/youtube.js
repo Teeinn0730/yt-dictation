@@ -31,6 +31,37 @@ export function parseVideoId(input) {
   }
 }
 
+// 讀取影片長度（秒）：在畫面外放一個看不到的播放器，讀完就移除；讀不到回傳 0
+export async function getVideoDuration(videoId, timeoutMs = 8000) {
+  await loadApi();
+  const host = document.createElement('div');
+  host.style.cssText = 'position:fixed;left:-10000px;top:0;width:320px;height:180px;';
+  const el = document.createElement('div');
+  host.appendChild(el);
+  document.body.appendChild(host);
+  let p = null;
+  try {
+    return await new Promise(resolve => {
+      const deadline = Date.now() + timeoutMs;
+      const poll = () => {
+        const d = p?.getDuration?.() || 0;
+        if (d > 0) return resolve(d);
+        if (Date.now() > deadline) return resolve(0);
+        setTimeout(poll, 200);
+      };
+      p = new YT.Player(el, {
+        videoId,
+        playerVars: { autoplay: 0, mute: 1 },
+        events: { onReady: poll, onError: () => resolve(0) },
+      });
+      setTimeout(() => resolve(0), timeoutMs + 500);
+    });
+  } finally {
+    try { p?.destroy(); } catch { /* ignore */ }
+    host.remove();
+  }
+}
+
 const ERRORS = {
   2: '影片網址有誤。',
   5: '播放器發生錯誤，請重新整理頁面。',

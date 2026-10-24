@@ -131,6 +131,9 @@ main { padding: 16px; }
 .tab { flex: 1; }
 .tab.active { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
 .howto { margin-bottom: 10px; font-size: .9rem; }
+.range-choice { display: flex; flex-wrap: wrap; gap: 4px 18px; }
+.range-choice .check { margin: 4px 0; }
+#range-part { margin: 4px 0 6px 26px; }
 .howto summary { cursor: pointer; color: var(--accent-strong); }
 .howto ol, .howto-list { padding-left: 1.3em; margin: 8px 0; }
 .howto-list { font-size: .92rem; }

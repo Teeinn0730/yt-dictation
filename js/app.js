@@ -1,7 +1,7 @@
 import { parseTranscript, detectLang, formatTime } from './transcript.js';
 import { normWord, tokenize, lcsPairs, maskWord, cleanWord, isStopWord, shuffle } from './dictation.js';
 import { cuesToWords, buildSegments, newLesson, loadLesson, saveLesson, lessonStats, appendWords, lessonEndSec } from './lesson.js';
-import { SegmentPlayer, parseVideoId } from './youtube.js';
+import { SegmentPlayer, parseVideoId, getVideoDuration } from './youtube.js';
 import { lookup, pronounce } from './dictionary.js';
 import * as gemini from './gemini.js';
 import * as store from './storage.js';
@@ -93,6 +93,7 @@ function updateDueBadge() {
 // 首頁：新增影片、我的影片
 // =====================================================================
 let newVideoId = null;
+let newDuration = null; // Promise<影片長度秒數>，讀不到是 0
 let srcTab = 'paste';
 
 function renderHome() {
@@ -141,6 +142,11 @@ function onLoadUrl() {
   // 已經有練習：可以用 Gemini 接續處理後面的時間，預設從目前涵蓋到的地方開始
   $('#append-row').hidden = !existing;
   $('#tr-start').value = existing ? Math.floor(lessonEndSec(existing) / 60) : 0;
+  // 影片長度：用看不到的 YouTube 播放器讀，不耗 Gemini 額度
+  $('input[name=tr-range][value=all]').checked = true;
+  $('#range-part').hidden = true;
+  newDuration = getVideoDuration(id).catch(() => 0);
+  renderRangeLabel(id, existing);
   setStatus($('#create-status'), '');
   $('#step-transcript').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -151,6 +157,27 @@ $$('.tab').forEach(tab => tab.addEventListener('click', () => {
   srcTab = tab.dataset.tab;
   $$('.tab').forEach(t => t.classList.toggle('active', t === tab));
   $$('[data-panel]').forEach(p => { p.hidden = p.dataset.panel !== srcTab; });
+}));
+
+async function renderRangeLabel(id, existing) {
+  const label = $('#range-all-label');
+  label.textContent = '整部影片（讀取長度中…）';
+  const dur = await newDuration;
+  if (newVideoId !== id) return;
+  if (!dur) {
+    label.textContent = '整部影片（讀不到影片長度）';
+    $('input[name=tr-range][value=part]').checked = true;
+    $('#range-part').hidden = false;
+    return;
+  }
+  const from = existing ? lessonEndSec(existing) : 0;
+  label.textContent = existing && from > 5
+    ? `整部影片：接著從 ${formatTime(from)} 處理到結尾（${formatTime(dur)}）`
+    : `整部影片（${formatTime(dur)}）`;
+}
+
+$$('input[name=tr-range]').forEach(r => r.addEventListener('change', () => {
+  $('#range-part').hidden = $('input[name=tr-range]:checked').value !== 'part';
 }));
 
 async function fetchTitle(id) {
@@ -261,9 +288,24 @@ async function createLesson() {
       }
     } else {
       if (!gemini.hasKey()) throw new Error('自動產生字幕需要 Gemini 金鑰，請先到「設定」頁貼上。');
-      const startMin = Math.max(0, +$('#tr-start').value || 0);
-      const lenMin = Math.min(120, Math.max(1, +$('#tr-len').value || 10));
-      const startSec = startMin * 60, endSec = (startMin + lenMin) * 60;
+      let startSec, endSec;
+      if ($('input[name=tr-range]:checked').value === 'all') {
+        const dur = Math.ceil(await newDuration);
+        if (!dur) throw new Error('讀不到這部影片的長度，請改選「只處理一段」並自己輸入範圍。');
+        // 接續時從現有練習結束前幾秒開始，重疊的句子會自動去掉
+        startSec = append ? Math.max(0, Math.floor(lessonEndSec(loadLesson(id))) - 5) : 0;
+        endSec = dur;
+        if (endSec - startSec < 3) throw new Error('這部影片已經全部處理完了。');
+        const min = Math.round((endSec - startSec) / 60);
+        if (min > 60 && !confirm(`要處理的長度約 ${min} 分鐘，大概需要 ${Math.ceil(min / 5) * 1.5} 分鐘左右，也會用掉比較多免費額度。確定要處理整部嗎？`)) {
+          return;
+        }
+      } else {
+        const startMin = Math.max(0, +$('#tr-start').value || 0);
+        const lenMin = Math.min(120, Math.max(1, +$('#tr-len').value || 10));
+        startSec = startMin * 60;
+        endSec = (startMin + lenMin) * 60;
+      }
       const part = (i, n) => (n > 1 ? `第 ${i + 1} / ${n} 段・` : '');
       signal = progress.start('✨ Gemini 正在看影片…', WATCH_HINT, 240);
       let result;
@@ -313,6 +355,7 @@ async function createLesson() {
           $('#tr-start').value = Math.floor(partial.doneUntil / 60);
           $('#append-row').hidden = false;
           $('#opt-append').checked = true;
+          renderRangeLabel(id, loadLesson(id));
           renderLibrary();
         }
       } catch (err) {

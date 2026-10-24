@@ -68,11 +68,15 @@
         <div data-panel="ai" hidden>
           <p class="muted small">Gemini 會直接「看」這部影片並產生有時間軸的字幕，適合沒有字幕或在手機上使用。只支援<b>公開</b>影片；時間軸大約只準到 1 秒左右。<br>
             長影片會自動拆成 5 分鐘一段依序處理，最後合併成一份練習。</p>
-          <div class="row wrap">
+          <label id="append-row" class="check" hidden><input id="opt-append" type="checkbox" checked> 接在現有練習後面（保留原本的進度）</label>
+          <div class="range-choice">
+            <label class="check"><input type="radio" name="tr-range" value="all" checked> <span id="range-all-label">整部影片</span></label>
+            <label class="check"><input type="radio" name="tr-range" value="part"> 只處理一段</label>
+          </div>
+          <div id="range-part" class="row wrap" hidden>
             <label>從第 <input id="tr-start" type="number" min="0" value="0" class="num"> 分鐘開始</label>
             <label>處理 <input id="tr-len" type="number" min="1" max="120" value="10" class="num"> 分鐘</label>
           </div>
-          <label id="append-row" class="check" hidden><input id="opt-append" type="checkbox" checked> 接在現有練習後面（保留原本的進度）</label>
         </div>
 
         <button id="btn-create" class="primary big">建立練習 →</button>
