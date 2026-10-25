@@ -568,7 +568,8 @@ function renderSlots() {
         const extra = given > typed ? `<span class="given">${esc(target.slice(typed, given))}</span>` : '';
         cls = 'partial';
         html = `${esc(mk.text)}${extra}<span class="rest">${'•'.repeat(Math.max(0, target.length - Math.max(typed, given)))}</span>`;
-      } else if (mk && !(mk.type === 'wrong' && letterHints.has(i))) {
+      } else if (mk) {
+        // 打錯也照樣顯示你打的字（紅色），用過字母提示也一樣
         cls = mk.type;
         html = esc(mk.text);
       } else {
