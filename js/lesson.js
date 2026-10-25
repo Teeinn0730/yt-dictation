@@ -1,5 +1,9 @@
 // 課程資料：把字幕拆成「單字」，每個字有時間與斷點強度，三種切句粒度共用同一份進度
 import { normWord, lcsPairs } from './dictation.js';
+import { NOISE } from './transcript.js';
+
+// 估算時間時，一段狀聲詞大約佔多少「字元」的時間
+const NOISE_WEIGHT = 14;
 import { loadLessonData, saveLessonData } from './storage.js';
 
 // 斷點強度 b：0 無、1 短詞組、2 意群、3 句尾
@@ -22,26 +26,37 @@ export function cuesToWords(cues) {
     const toks = [];
     for (const t of cue.text.split(/\s+/).filter(Boolean)) {
       if (t === '/' || t === '|') {
-        const prev = toks[toks.length - 1] || words[words.length - 1];
+        const prev = toks.filter(x => !x.noise).pop() || words[words.length - 1];
         if (prev) prev.b = Math.max(prev.b, t === '|' ? 2 : 1);
         continue;
       }
+      if (t === NOISE) {
+        // 狀聲詞前面的字要斷開；狀聲詞本身不練習，但估算時間時佔一段
+        const prev = toks.filter(x => !x.noise).pop() || words[words.length - 1];
+        if (prev) prev.noiseAfter = true;
+        toks.push({ noise: true });
+        continue;
+      }
       if (!normWord(t)) continue;
-      toks.push({ text: t, b: 0, cueEnd: false });
+      toks.push({ text: t, b: 0, cueEnd: false, noiseAfter: false });
     }
-    if (!toks.length) continue;
-    // 一行字幕裡的每個字，依字元長度估算時間
-    const total = toks.reduce((s, t) => s + t.text.length + 1, 0);
+    const real = toks.filter(t => !t.noise);
+    if (!real.length) continue;
+    // 一行字幕裡的每個字，依字元長度估算時間（狀聲詞也佔一段時間）
+    const weight = t => (t.noise ? NOISE_WEIGHT : t.text.length + 1);
+    const total = toks.reduce((s, t) => s + weight(t), 0);
     const dur = Math.max(0.3, cue.end - cue.start);
     let off = 0;
     for (const t of toks) {
-      const len = t.text.length + 1;
-      t.start = cue.start + (dur * off) / total;
-      t.end = cue.start + (dur * (off + len)) / total;
+      const len = weight(t);
+      if (!t.noise) {
+        t.start = cue.start + (dur * off) / total;
+        t.end = cue.start + (dur * (off + len)) / total;
+        words.push(t);
+      }
       off += len;
-      words.push(t);
     }
-    toks[toks.length - 1].cueEnd = true;
+    real[real.length - 1].cueEnd = true;
   }
   applyHeuristics(words);
   return words;
@@ -56,6 +71,7 @@ function applyHeuristics(words) {
     if (SENTENCE_END.test(w.text) && !ABBR.test(w.text)) w.b = 3;
     else if (CLAUSE_END.test(w.text)) w.b = Math.max(w.b, 2);
     if (w.cueEnd) w.b = Math.max(w.b, cueBound);
+    if (w.noiseAfter) w.b = 3;
     if (!next) { w.b = 3; continue; }
     const gap = next.start - w.end;
     if (gap > 1.5) w.b = 3;
@@ -81,7 +97,7 @@ export function applyEnhanced(chunk, text) {
     let b = t.mark;
     if (SENTENCE_END.test(t.text) && !ABBR.test(t.text)) b = 3;
     else if (CLAUSE_END.test(t.text)) b = Math.max(b, 1);
-    w.b = Math.max(b, w.cueEnd ? 1 : 0);
+    w.b = Math.max(b, w.cueEnd ? 1 : 0, w.noiseAfter ? 3 : 0);
   }
   return pairs.length;
 }
@@ -91,23 +107,28 @@ export function buildSegments(words, level) {
   // Natural／Fluent 只在字幕換行處斷句：一行字幕的開始、結束時間是 YouTube 給的，最準；
   // 同一行裡面的字只有估算時間，在行內硬切容易切到聲音。只有 Steady 會切進行內。
   // （舊的課程沒有存換行位置，維持原本的切法）
+  // Natural 遇到狀聲詞一定斷開；Fluent 一行轉錄稿就是一句，照原本的時間整段播完，不因太長而切開
   const cueAware = level !== 'steady' && words.some(w => w.cueEnd !== undefined);
   const strength = w => {
     if (!cueAware) return w.b;
     if (!w.cueEnd) return 0;
     return level === 'natural' ? Math.max(w.b, 2) : w.b;
   };
+  const hardCut = w => cueAware && ((level === 'natural' && w.noiseAfter) || (level === 'fluent' && w.cueEnd));
+  const noMax = cueAware && level === 'fluent';
   const segs = [];
   let s = 0;
   while (s < words.length) {
     let cut = -1;
     for (let e = s; e < words.length; e++) {
       const len = e - s + 1;
+      if (hardCut(words[e])) { cut = e; break; }
       const b = strength(words[e]);
       if ((b >= bound && len >= min) || (b === 3 && len >= 2)) { cut = e; break; }
       // 後面隔了一段很長的空白（例如只有音效的片段），一定要斷開，不然會播很久
-      if (words[e + 1] && words[e + 1].start - words[e].end > 2) { cut = e; break; }
-      if (len >= max) {
+      // （Fluent 不在同一行裡面切：行內的空白通常是狀聲詞，整行照原本時間播完）
+      if (words[e + 1] && words[e + 1].start - words[e].end > 2 && !(noMax && !words[e].cueEnd)) { cut = e; break; }
+      if (len >= max && !noMax) {
         // 太長了：在範圍內找最強、最後面的斷點
         // 優先選字幕換行處，其次才是行內的斷點
         let best = e, bestB = 0;
@@ -120,7 +141,14 @@ export function buildSegments(words, level) {
       }
     }
     if (cut < 0) cut = words.length - 1;
-    segs.push({ from: s, to: cut + 1, start: words[s].start, end: words[cut].end });
+    // 狀聲詞之後的句子：開始時間只是估的，提早 1 秒開始播，避免切到開頭；狀聲詞之前的句子則多播一點
+    const afterNoise = s > 0 && words[s - 1].noiseAfter;
+    segs.push({
+      from: s,
+      to: cut + 1,
+      start: Math.max(0, words[s].start - (afterNoise ? 1 : 0)),
+      end: words[cut].end + (words[cut].noiseAfter ? 0.5 : 0),
+    });
     s = cut + 1;
   }
   return segs;
@@ -171,6 +199,34 @@ export function appendWords(L, newWords, newPhrases = []) {
   return added.length;
 }
 
+// 重新建立同一部影片時，把舊課程的進度搬到新課程：同一個字、時間差不多，就視為同一個字
+// （片語在新課程沒有標出時也一併搬過去）。回傳搬了幾個字
+export function transferProgress(oldL, newL) {
+  const oldN = oldL.words.map(w => normWord(w.text));
+  const newN = newL.words.map(w => normWord(w.text));
+  const map = new Map();
+  let j = 0;
+  for (let i = 0; i < oldN.length; i++) {
+    for (let k = j; k < Math.min(newN.length, j + 40); k++) {
+      if (newN[k] === oldN[i] && Math.abs(newL.words[k].start - oldL.words[i].start) < 8) {
+        map.set(i, k);
+        newL.state[k] = oldL.state[i];
+        j = k + 1;
+        break;
+      }
+    }
+  }
+  if (!newL.phrases?.length) {
+    newL.phrases = (oldL.phrases || [])
+      .map(p => ({ ...p, from: map.get(p.from), to: map.has(p.to - 1) ? map.get(p.to - 1) + 1 : undefined }))
+      .filter(p => p.from != null && p.to != null && p.to > p.from);
+  }
+  if (map.has(oldL.cursor)) newL.cursor = map.get(oldL.cursor);
+  newL.level = oldL.level;
+  newL.title = newL.title || oldL.title;
+  return map.size;
+}
+
 // 課程目前涵蓋到影片的第幾秒（接續處理時從這裡開始）
 export const lessonEndSec = L => L.words.reduce((m, w) => Math.max(m, w.end), 0);
 
@@ -198,7 +254,7 @@ export function saveLesson(L) {
     enhanced: L.enhanced,
     source: L.source,
     state: L.state.join(''),
-    words: L.words.map(w => [w.text, Math.round(w.start * 100), Math.round(w.end * 100), w.b, w.cueEnd ? 1 : 0]),
+    words: L.words.map(w => [w.text, Math.round(w.start * 100), Math.round(w.end * 100), w.b, w.cueEnd ? 1 : 0, w.noiseAfter ? 1 : 0]),
     phrases: (L.phrases || []).map(p => [p.from, p.to, p.phrase, p.zh, p.note || '']),
   };
   const st = lessonStats(L);
@@ -208,7 +264,7 @@ export function saveLesson(L) {
 export function loadLesson(id) {
   const d = loadLessonData(id);
   if (!d?.words) return null;
-  const words = d.words.map(([text, s, e, b, ce]) => ({ text, start: s / 100, end: e / 100, b, cueEnd: ce === undefined ? undefined : !!ce }));
+  const words = d.words.map(([text, s, e, b, ce, na]) => ({ text, start: s / 100, end: e / 100, b, cueEnd: ce === undefined ? undefined : !!ce, noiseAfter: !!na }));
   const state = (d.state || '').padEnd(words.length, '0').slice(0, words.length).split('');
   const phrases = (d.phrases || []).map(([from, to, phrase, zh, note]) => ({ from, to, phrase, zh, note }));
   return { videoId: d.videoId, title: d.title || '', words, state, level: d.level || 'natural', cursor: d.cursor || 0, enhanced: !!d.enhanced, source: d.source, phrases };

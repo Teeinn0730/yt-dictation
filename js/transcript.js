@@ -26,6 +26,9 @@ export function formatTime(sec) {
   return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+// [Screaming]、(laughs) 這類狀聲詞：不練習，但保留一個記號，讓後面知道「這裡有一段音效、會佔時間」
+export const NOISE = '⁂';
+
 function cleanText(t) {
   return t
     .replace(/<[^>]+>/g, '')
@@ -33,12 +36,13 @@ function cleanText(t) {
     .replace(/&amp;/g, '&')
     .replace(/&#39;/g, "'")
     .replace(/&quot;/g, '"')
-    .replace(/\[[^\]]*\]|\([^)]*\)/g, ' ') // [Music] (laughs) 這類行內標記
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, ` ${NOISE} `) // [Music] (laughs) 這類行內標記
     .replace(/https?:\/\/\S+|www\.\S+/g, ' ')
     // 說話者名稱，例如「Eustace: OH, DOG!」「Le Quack: DIRTY DOG.」（全大寫字幕裡的人名是大小寫混合）
     .replace(/(^|[\s.!?])(?:[A-Z][a-z][A-Za-z.]*)(?: [A-Z][a-z][A-Za-z.]*)?:\s/g, '$1 ')
     .replace(/(^|\s)[-–—]+(?=\s|$)/g, ' ')
     .replace(/\s+/g, ' ')
+    .replace(new RegExp(`(${NOISE} ?)+`, 'g'), `${NOISE} `)
     .trim();
 }
 
@@ -121,7 +125,9 @@ export function fillEnds(cues) {
       // 轉錄稿只有開始時間：到下一行開始為止，但不超過「說完這些字」需要的時間，
       // 避免把幾秒的台詞攤到後面一大段沒有人說話的空白
       const until = next ? next.start : cues[i].start + 5;
-      cues[i].end = Math.min(until, cues[i].start + speechSeconds(cues[i].text));
+      // 有狀聲詞的行（例如中間有一段尖叫），說話時間沒辦法用字數估，直接播到下一行開始
+      const cap = cues[i].text.includes(NOISE) ? 15 : speechSeconds(cues[i].text);
+      cues[i].end = Math.min(until, cues[i].start + cap);
     }
     cues[i].end = Math.min(cues[i].end, cues[i].start + 15);
   }

@@ -1,6 +1,6 @@
 import { parseTranscript, detectLang, formatTime } from './transcript.js';
 import { normWord, tokenize, lcsPairs, maskWord, cleanWord, isStopWord, shuffle } from './dictation.js';
-import { cuesToWords, buildSegments, newLesson, loadLesson, saveLesson, lessonStats, appendWords, lessonEndSec } from './lesson.js';
+import { cuesToWords, buildSegments, newLesson, loadLesson, saveLesson, lessonStats, appendWords, lessonEndSec, transferProgress } from './lesson.js';
 import { SegmentPlayer, parseVideoId, getVideoDuration } from './youtube.js';
 import { lookup, pronounce } from './dictionary.js';
 import * as gemini from './gemini.js';
@@ -243,6 +243,12 @@ async function saveWords(id, words, { enhanced, source, append, phrases = [] }) 
     return added;
   }
   const lesson = newLesson({ videoId: id, title: await fetchTitle(id), words, enhanced, source, phrases });
+  // 同一部影片重新建立：已經聽寫過的字盡量保留
+  const old = loadLesson(id);
+  if (old) {
+    const kept = transferProgress(old, lesson);
+    if (old.state.some(s => s !== '0')) toast(`已保留舊的練習進度（對應到 ${kept} 個字）`, 5000);
+  }
   if (!saveLesson(lesson)) throw new Error('瀏覽器儲存空間不足，請到首頁刪除一些舊影片。');
   return words.length;
 }
@@ -254,7 +260,7 @@ async function createLesson() {
   if (!id) return;
   const exists = store.listLessons().some(l => l.videoId === id);
   const append = exists && srcTab === 'ai' && $('#opt-append').checked;
-  if (exists && !append && !confirm('這部影片已經有練習進度，要重新建立並清除舊進度嗎？')) return;
+  if (exists && !append && !confirm('這部影片已經有練習了，要重新建立嗎？\n已經聽寫過的字會盡量保留下來。')) return;
 
   btn.disabled = true;
   setStatus(status, '');
