@@ -324,6 +324,68 @@ ${chunk.map(w => w.text).join(' ')}
   }
 }
 
+// ---------- 標出片語 ----------
+const PHRASE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    phrases: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: { text: { type: 'STRING' }, phrase: { type: 'STRING' }, zh: { type: 'STRING' }, note: { type: 'STRING' } },
+        required: ['text', 'phrase', 'zh'],
+      },
+    },
+  },
+  required: ['phrases'],
+};
+
+// 找出字幕裡的片語、慣用語、動詞片語、固定搭配。回傳 [{ from, to, phrase, zh, note }]，from/to 是字的索引（to 不含）
+export async function findPhrases(words, { onProgress, onStatus, signal } = {}) {
+  const norms = words.map(w => normWord(w.text));
+  const found = [];
+  const n = Math.ceil(words.length / CHUNK);
+  for (let c = 0; c < n; c++) {
+    const from = c * CHUNK, to = Math.min(words.length, (c + 1) * CHUNK);
+    const prompt = `You are helping a Taiwanese intermediate English learner study an English video transcript.
+Find the idioms, phrasal verbs, fixed expressions and useful collocations (2 words or more) in the transcript below.
+- Skip trivial word combinations (e.g. "of the", "I am", "it is"), names and titles.
+- text: the words EXACTLY as they appear in the transcript (a contiguous run of words, copied verbatim).
+- phrase: the dictionary form, using "someone"/"something" for variable parts (e.g. "in the middle of nowhere", "make someone look bad", "give up").
+- zh: a concise meaning in Traditional Chinese (Taiwan usage) that fits this context.
+- note: optional, one very short usage note in Traditional Chinese (or empty).
+
+Transcript:
+<<<
+${words.slice(from, to).map(w => w.text).join(' ')}
+>>>`;
+    const res = await generate([{ text: prompt }], { schema: PHRASE_SCHEMA, temperature: 0.2, onStatus, signal });
+    for (const p of res.phrases || []) {
+      const toks = String(p.text || '').split(/\s+/).map(normWord).filter(Boolean);
+      if (toks.length < 2) continue;
+      // 在這一段裡找出所有出現的位置（模型給的是原文，用比對的方式定位，比要它給索引可靠）
+      for (let i = from; i + toks.length <= to; i++) {
+        if (toks.every((t, k) => norms[i + k] === t)) {
+          found.push({ from: i, to: i + toks.length, phrase: String(p.phrase || p.text).trim(), zh: String(p.zh || '').trim(), note: String(p.note || '').trim() });
+        }
+      }
+    }
+    onProgress?.(c + 1, n);
+  }
+  // 互相重疊時，保留比較長的片語
+  found.sort((a, b) => (b.to - b.from) - (a.to - a.from) || a.from - b.from);
+  const used = new Uint8Array(words.length);
+  const kept = [];
+  for (const p of found) {
+    let free = true;
+    for (let i = p.from; i < p.to; i++) if (used[i]) { free = false; break; }
+    if (!free) continue;
+    for (let i = p.from; i < p.to; i++) used[i] = 1;
+    kept.push(p);
+  }
+  return kept.sort((a, b) => a.from - b.from);
+}
+
 // ---------- 單字中文解釋 ----------
 const EXPLAIN_SCHEMA = {
   type: 'OBJECT',

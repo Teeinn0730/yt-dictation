@@ -128,7 +128,8 @@ export function buildSegments(words, level) {
 
 // 接續處理：把新產生的字幕接到現有課程裡，原本的進度不變。
 // 新字幕以「一行字幕」為單位加入；和現有字幕時間重疊的行會略過，避免重複。回傳加入幾個字
-export function appendWords(L, newWords) {
+// newPhrases：新字幕裡的片語（索引指向 newWords），會一起換算成合併後的位置
+export function appendWords(L, newWords, newPhrases = []) {
   const existing = L.words.slice().sort((a, b) => a.start - b.start);
   const starts = existing.map(w => w.start);
   const covered = (a, b) => {
@@ -150,6 +151,11 @@ export function appendWords(L, newWords) {
   if (!added.length) return 0;
 
   const cursorWord = L.words[L.cursor];
+  // 片語記住頭尾兩個字本身，合併重新排序後再換算回索引
+  const refs = [
+    ...(L.phrases || []).map(p => ({ ...p, fw: L.words[p.from], lw: L.words[p.to - 1] })),
+    ...newPhrases.map(p => ({ ...p, fw: newWords[p.from], lw: newWords[p.to - 1] })),
+  ];
   const all = [
     ...L.words.map((w, i) => ({ w, s: L.state[i] })),
     ...added.map(w => ({ w, s: '0' })),
@@ -157,6 +163,11 @@ export function appendWords(L, newWords) {
   L.words = all.map(x => x.w);
   L.state = all.map(x => x.s);
   L.cursor = Math.max(0, L.words.indexOf(cursorWord));
+  const pos = new Map(L.words.map((w, i) => [w, i]));
+  L.phrases = refs
+    .filter(r => pos.has(r.fw) && pos.has(r.lw))
+    .map(({ fw, lw, ...p }) => ({ ...p, from: pos.get(fw), to: pos.get(lw) + 1 }))
+    .sort((a, b) => a.from - b.from);
   return added.length;
 }
 
@@ -165,8 +176,9 @@ export const lessonEndSec = L => L.words.reduce((m, w) => Math.max(m, w.end), 0)
 
 // ---------- 存取 ----------
 // state：每個字一個字元，0 未完成、1 聽寫正確、2 揭曉、3 Easy 提示
-export function newLesson({ videoId, title, words, enhanced, source }) {
-  return { videoId, title: title || '', words, state: '0'.repeat(words.length).split(''), level: 'natural', cursor: 0, enhanced: !!enhanced, source };
+// phrases：[{ from, to, phrase, zh, note }]，from/to 是字的索引（to 不含）
+export function newLesson({ videoId, title, words, enhanced, source, phrases = [] }) {
+  return { videoId, title: title || '', words, state: '0'.repeat(words.length).split(''), level: 'natural', cursor: 0, enhanced: !!enhanced, source, phrases };
 }
 
 export function lessonStats(L) {
@@ -187,6 +199,7 @@ export function saveLesson(L) {
     source: L.source,
     state: L.state.join(''),
     words: L.words.map(w => [w.text, Math.round(w.start * 100), Math.round(w.end * 100), w.b, w.cueEnd ? 1 : 0]),
+    phrases: (L.phrases || []).map(p => [p.from, p.to, p.phrase, p.zh, p.note || '']),
   };
   const st = lessonStats(L);
   return saveLessonData(L.videoId, data, { title: L.title, total: st.total, done: st.done });
@@ -197,5 +210,6 @@ export function loadLesson(id) {
   if (!d?.words) return null;
   const words = d.words.map(([text, s, e, b, ce]) => ({ text, start: s / 100, end: e / 100, b, cueEnd: ce === undefined ? undefined : !!ce }));
   const state = (d.state || '').padEnd(words.length, '0').slice(0, words.length).split('');
-  return { videoId: d.videoId, title: d.title || '', words, state, level: d.level || 'natural', cursor: d.cursor || 0, enhanced: !!d.enhanced, source: d.source };
+  const phrases = (d.phrases || []).map(([from, to, phrase, zh, note]) => ({ from, to, phrase, zh, note }));
+  return { videoId: d.videoId, title: d.title || '', words, state, level: d.level || 'natural', cursor: d.cursor || 0, enhanced: !!d.enhanced, source: d.source, phrases };
 }

@@ -235,14 +235,14 @@ $('#btn-cancel').addEventListener('click', () => progress.ctrl?.abort('user'));
 const WATCH_HINT = 'Gemini 會先把這一段影片看完才開始寫字幕，這段時間沒有進度是正常的（通常 30 秒到 2 分鐘）。';
 
 // 把字存成練習：append 時接在現有練習後面，否則建立新的。回傳加入幾個字
-async function saveWords(id, words, { enhanced, source, append }) {
+async function saveWords(id, words, { enhanced, source, append, phrases = [] }) {
   if (append) {
     const lesson = loadLesson(id);
-    const added = appendWords(lesson, words);
+    const added = appendWords(lesson, words, phrases);
     if (added && !saveLesson(lesson)) throw new Error('瀏覽器儲存空間不足，請到首頁刪除一些舊影片。');
     return added;
   }
-  const lesson = newLesson({ videoId: id, title: await fetchTitle(id), words, enhanced, source });
+  const lesson = newLesson({ videoId: id, title: await fetchTitle(id), words, enhanced, source, phrases });
   if (!saveLesson(lesson)) throw new Error('瀏覽器儲存空間不足，請到首頁刪除一些舊影片。');
   return words.length;
 }
@@ -331,9 +331,26 @@ async function createLesson() {
     }
     if (!words.length) throw new Error('字幕裡沒有可以練習的英文單字。');
 
+    // 標出片語：失敗不影響練習，之後也可以在練習頁再試
+    let phrases = [];
+    if (enhanced && gemini.hasKey()) {
+      signal = progress.start('📌 標出片語…', '', 240);
+      progress.set(0);
+      try {
+        phrases = await gemini.findPhrases(words, {
+          signal,
+          onStatus,
+          onProgress: (i, total) => progress.set(i / total, `📌 標出片語…（${i} / ${total} 段）`, ''),
+        });
+      } catch (e) {
+        if (signal.reason === 'user') throw e;
+        toast(`標出片語失敗，可以之後在練習頁右側再試：${e.message}`, 6000);
+      }
+    }
+
     progress.stop();
     setStatus(status, '建立中…');
-    const added = await saveWords(id, words, { enhanced, source: srcTab, append });
+    const added = await saveWords(id, words, { enhanced, source: srcTab, append, phrases });
     if (append && !added) throw new Error('這段時間的字幕已經都在練習裡了，請把「從第幾分鐘開始」往後調。');
     if (append) toast(`已接續加入 ${added} 個字`);
     L = null;
@@ -403,6 +420,8 @@ async function openLesson(id) {
     L = lesson;
   }
   showView('lesson');
+  indexPhrases();
+  renderPhraseCard();
   $('#lesson-title').textContent = L.title;
   applyPlayerPrefs();
   setLevel(L.level, false);
@@ -531,11 +550,12 @@ function computeHints() {
 }
 
 function renderSlots() {
+  hideTip();
   const s = segs[segIdx];
   let n = 0;
-  $('#slots').innerHTML = segWords(s).map(i => {
+  const slot = i => {
     const w = L.words[i], st = L.state[i], mk = marks.get(i);
-    let cls, html, title = '點一下查字典';
+    let cls, html, title = hoverable ? '' : '點一下查字典';
     if (st === '1') { cls = 'ok'; html = esc(w.text); }
     else if (st === '2') { cls = 'revealed'; html = esc(w.text); }
     else if (st === '3' || hints.has(i)) { cls = 'hint'; html = esc(w.text); }
@@ -557,9 +577,123 @@ function renderSlots() {
           + (n <= 9 && !isTouch ? `<sup>${n}</sup>` : '');
       }
     }
-    return `<button class="slot ${cls}" data-wi="${i}" title="${title}">${html}</button>`;
-  }).join('');
+    return `<button class="slot ${cls}" data-wi="${i}"${title ? ` title="${title}"` : ''}>${html}</button>`;
+  };
+  // 片語整組都聽出來之後，才用框線標出來，避免提前透露答案
+  const out = [];
+  let open = null;
+  for (const i of segWords(s)) {
+    const p = phraseAt.get(i);
+    const show = p && phraseVisible(p) ? p : null;
+    if (open && open !== show) { out.push('</span>'); open = null; }
+    if (show && !open) { out.push('<span class="phrase-group">'); open = show; }
+    out.push(slot(i));
+  }
+  if (open) out.push('</span>');
+  $('#slots').innerHTML = out.join('');
   $('#slots').classList.toggle('complete', completed);
+}
+
+// ---------- 片語 ----------
+let phraseAt = new Map(); // 字的索引 → 所屬片語
+
+function indexPhrases() {
+  phraseAt = new Map();
+  for (const p of L?.phrases || []) for (let i = p.from; i < p.to; i++) phraseAt.set(i, p);
+}
+
+const phraseVisible = p => {
+  for (let i = p.from; i < p.to; i++) if (L.state[i] === '0' && !hints.has(i)) return false;
+  return true;
+};
+
+function renderPhraseCard() {
+  const count = L.phrases?.length || 0;
+  $('#phrase-card').hidden = !count && !gemini.hasKey();
+  $('#phrase-info').textContent = count
+    ? `這部影片標出了 ${count} 個片語。整個片語都聽出來後，會用紫色框線標示；滑鼠移過去可以看意思。`
+    : '還沒有標出片語。可以請 Gemini 找出影片裡的片語、慣用語和固定搭配。';
+  $('#btn-phrases').hidden = !gemini.hasKey();
+  $('#btn-phrases').textContent = count ? '✨ 重新標出片語' : '✨ 用 Gemini 標出片語';
+}
+
+$('#btn-phrases').addEventListener('click', async () => {
+  const btn = $('#btn-phrases');
+  const lesson = L;
+  btn.disabled = true;
+  try {
+    const phrases = await gemini.findPhrases(lesson.words, {
+      onStatus: msg => { $('#phrase-info').textContent = msg; },
+      onProgress: (i, n) => { $('#phrase-info').textContent = `Gemini 標出片語中…（${i} / ${n} 段）`; },
+    });
+    lesson.phrases = phrases;
+    saveLesson(lesson);
+    if (L === lesson) {
+      indexPhrases();
+      renderSlots();
+      renderPhraseCard();
+    }
+    toast(`標出了 ${phrases.length} 個片語`);
+  } catch (e) {
+    $('#phrase-info').textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+$('#phrase-info').textContent = '';
+
+// ---------- 滑鼠移到字上：顯示單字和片語的意思（只在有滑鼠的裝置） ----------
+const hoverable = matchMedia('(hover: hover)').matches;
+let tipFor = null;
+
+function hideTip() {
+  tipFor = null;
+  $('#tip').hidden = true;
+}
+
+function placeTip(anchor) {
+  const tip = $('#tip');
+  const r = anchor.getBoundingClientRect();
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let top = r.top - h - 8;
+  if (top < 8) top = r.bottom + 8;
+  const left = Math.min(window.innerWidth - w - 8, Math.max(8, r.left + r.width / 2 - w / 2));
+  tip.style.top = `${top}px`;
+  tip.style.left = `${left}px`;
+}
+
+async function showTip(btn) {
+  const wi = +btn.dataset.wi;
+  if (tipFor === wi) return;
+  if (isOpen(wi)) return hideTip(); // 還沒聽出來的字不顯示，避免提前看到答案
+  tipFor = wi;
+  const word = cleanWord(L.words[wi].text);
+  const p = phraseAt.get(wi);
+  const render = info => {
+    const def = info?.meanings?.[0];
+    $('#tip').innerHTML =
+      `<div><b>${esc(word)}</b> <span class="ipa">${esc(info?.ipa || '')}</span></div>` +
+      (info === undefined ? '<div class="muted">查詢中…</div>'
+        : def ? `<div><i class="muted">${esc(def.pos)}</i> ${esc(def.defs[0] || '')}</div>`
+        : '<div class="muted">字典查不到這個字</div>') +
+      (p && phraseVisible(p)
+        ? `<div class="tip-phrase">📌 <b>${esc(p.phrase)}</b><div>${esc(p.zh)}</div>${p.note ? `<div class="muted">${esc(p.note)}</div>` : ''}</div>`
+        : '') +
+      '<div class="muted tiny">點一下看完整解釋</div>';
+    placeTip(btn);
+  };
+  $('#tip').hidden = false;
+  render(undefined);
+  const info = await lookup(word);
+  if (tipFor === wi && btn.isConnected) render(info);
+}
+
+if (hoverable) {
+  $('#slots').addEventListener('mouseover', e => {
+    const b = e.target.closest('.slot');
+    if (b) showTip(b);
+  });
+  $('#slots').addEventListener('mouseleave', hideTip);
 }
 
 // 只露出前 n 個字母，其餘用圓點遮住
@@ -691,6 +825,7 @@ function reveal(wi) {
 $('#slots').addEventListener('click', e => {
   const b = e.target.closest('[data-wi]');
   if (!b) return;
+  hideTip();
   const wi = +b.dataset.wi;
   if (isOpen(wi)) reveal(wi);
   openWordSheet(wi);
@@ -827,6 +962,7 @@ async function openWordSheet(wi) {
     time: w.start,
     info: undefined,
     zh: null,
+    phrase: phraseAt.get(wi) || null,
   };
   sheetCtx = ctx;
   $('#sheet').hidden = false;
@@ -851,6 +987,19 @@ function renderSheet() {
   else if (c.zh?.error) zh = `<div class="zh-box">${esc(c.zh.error)}</div>`;
   else if (c.zh) zh = `<div class="zh-box"><b>${esc(c.zh.pos)}</b>　${esc(c.zh.zh)}${c.zh.note ? `<div class="muted small" style="margin-top:4px">${esc(c.zh.note)}</div>` : ''}</div>`;
   else zh = gemini.hasKey() ? '<button id="sheet-zh">🇹🇼 中文解釋（Gemini）</button>' : '';
+  let phrase = '';
+  if (c.phrase) {
+    const p = c.phrase, savedP = vocab.hasWord(p.phrase);
+    phrase = `<div class="phrase-box">
+      <div>📌 這個字屬於片語　<b>${esc(p.phrase)}</b></div>
+      <div>${esc(p.zh)}</div>
+      ${p.note ? `<div class="muted small">${esc(p.note)}</div>` : ''}
+      <div class="row">
+        <button data-say-phrase>🔊 念片語</button>
+        <button id="sheet-save-phrase" class="${savedP ? '' : 'primary'}" ${savedP ? 'disabled' : ''}>${savedP ? '✓ 片語已在單字本' : '⭐ 存片語'}</button>
+      </div>
+    </div>`;
+  }
 
   $('#sheet-body').innerHTML = `
     <div class="word-head"><h3>${esc(c.word)}</h3><span class="ipa">${esc(c.info?.ipa || '')}</span>${c.info?.headword && normWord(c.info.headword) !== normWord(c.word) ? `<span class="muted small">原形：${esc(c.info.headword)}</span>` : ''}</div>
@@ -858,6 +1007,7 @@ function renderSheet() {
       <button data-say="us">🔊 美式</button>
       <button data-say="uk">🔊 英式</button>
     </div>
+    ${phrase}
     ${dict}
     ${zh}
     <div class="context">${ctxHtml}</div>
@@ -869,6 +1019,24 @@ $('#sheet-body').addEventListener('click', async e => {
   if (!c) return;
   const say = e.target.closest('[data-say]')?.dataset.say;
   if (say) return pronounce(c.word, c.info, say);
+  if (e.target.closest('[data-say-phrase]')) return pronounce(c.phrase.phrase, null);
+  if (e.target.id === 'sheet-save-phrase') {
+    const p = c.phrase;
+    vocab.addWord({
+      word: p.phrase.toLowerCase(),
+      ipa: '',
+      meaningZh: p.zh,
+      meaningEn: p.note || '',
+      sentence: c.sentence,
+      videoId: c.videoId,
+      title: c.title,
+      time: Math.floor(L.words[p.from]?.start ?? c.time),
+    });
+    toast(`已把片語「${p.phrase}」存入單字本`);
+    updateDueBadge();
+    renderSheet();
+    return;
+  }
   if (e.target.id === 'sheet-zh') {
     c.zh = { loading: true };
     renderSheet();
